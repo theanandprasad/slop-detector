@@ -2,6 +2,8 @@
   "name": "slop-detector",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "repository": "github:theanandprasad/slop-detector",
   "type": "module",
   "scripts": {
     "dev": "wxt",
