@@ -6,7 +6,7 @@ export default defineConfig({
   outDir: 'dist',
   manifest: {
     name: 'Slop Detector',
-    description: 'Labels formulaic, low-effort writing on LinkedIn and X using Jev.',
+    description: 'Tells you which LinkedIn and X posts are useful and which are just engagement bait, using Jev.',
     permissions: ['storage', 'unlimitedStorage'],
     host_permissions: ['https://openrouter.ai/*'],
   },

@@ -1,106 +1,169 @@
-import type { HeuristicHit } from './heuristics';
+// Turns Jev's answers + local checks into one of four categories:
+//
+//                 not bait     bait
+//   useful        useful       baity   ("useful, but baity")
+//   not useful    casual       bait
+//
+// Thresholds are defaults; they're re-fitted to the user's own feedback once
+// there's enough of it (see calibrate.ts).
+
+import type { LocalChecks } from './heuristics';
 import type { Answer, DecisionsResponse } from './jev';
-import { SLOP_LEVELS, TELL_KEYS, TELLS, TEMPLATE_LEVEL, type SlopQuestionKey, type TellKey } from './questions';
+import {
+  ACTIONABLE_LEVEL,
+  BAIT_INTENTS,
+  BAIT_TACTICS,
+  INTENT_KEYS,
+  INTENTS,
+  TACTIC_KEYS,
+  USEFUL_LEVEL,
+  VALUE_LEVELS,
+  type IntentKey,
+  type QuestionKey,
+  type TacticKey,
+} from './questions';
 
-// Placeholder thresholds — tune with `npm run eval`.
-export const TELL_THRESHOLD = 0.6;
-/** Minimum P(template) for each tier. */
-export const TIER_THRESHOLDS = { some: 0.5, slop: 0.8 };
+export type Category = 'useful' | 'casual' | 'baity' | 'bait';
+export const CATEGORIES: Category[] = ['useful', 'casual', 'baity', 'bait'];
+
+export type Thresholds = {
+  /** Minimum P(value level ≥ USEFUL_LEVEL) for "useful". */
+  useful: number;
+  /** Minimum P(bait intent) for a single tactic to make a post bait. */
+  baitIntent: number;
+};
+export const DEFAULT_THRESHOLDS: Thresholds = { useful: 0.5, baitIntent: 0.5 };
+
+/** A Jev yes/no answer counts as "yes" at this probability. */
+export const NOUL_THRESHOLD = 0.6;
+/** Two or more distinct tactics make a post bait regardless of intent. */
+const TACTICS_FOR_BAIT = 2;
+/** A post this close below the useful threshold is tipped over by ≥ 2 value clues. */
+const VALUE_CLUE_WINDOW = 0.15;
 /**
- * Each non-green tier also needs this many distinct kinds of evidence (fired
- * patterns / phrase hits), so a colored badge always has a named reason.
+ * When Jev is this sure a post is written as an engagement formula (broetry,
+ * hook → story → moral), an "idea" isn't enough: only actionable info counts as
+ * useful. Formula writing still never makes a post bait on its own.
  */
-export const MIN_SIGNALS = { some: 1, slop: 2 };
+export const FORMULA_STRICT = 0.8;
 
-export type Tier = 'clean' | 'some' | 'slop';
-
-/** `counted`: whether this pattern counts toward the signal requirement. */
-export type FiredTell = { key: TellKey; label: string; p: number; counted: boolean };
+export type FiredTactic = {
+  key: TacticKey;
+  label: string;
+  /** Jev's probability, or null if only a local phrase matched. */
+  p: number | null;
+  phrases: string[];
+};
 
 export type Verdict = {
-  /** 0..1: Jev's probability that the post is a template (level ≥ TEMPLATE_LEVEL). */
-  score: number;
-  tier: Tier;
-  /** True when too few signals backed Jev's read, so the tier was lowered. */
-  capped: boolean;
-  /** The tier Jev's probability alone would give, before the signal requirement. */
-  jevTier: Tier;
-  /** Distinct kinds of evidence: fired patterns plus phrase hits, de-duplicated. */
-  signals: number;
-  /** Jev's probability for each slop level (index = level). */
-  levels: number[];
-  /** Jev's probability-weighted average level, 0..3. */
-  jevScore: number;
-  tells: FiredTell[];
-  heuristics: string[];
-  /** Separate AI-authorship read. Informational only: never affects tier or signals. */
+  category: Category;
+  /** What the model said, before any user label. */
+  predicted: Category;
+  /** The user's own label for this post, if they gave one (it wins over `predicted`). */
+  userLabel: Category | null;
+  /** True when the user's label differs from what the model said. */
+  overridden: boolean;
+
+  /** P(value level ≥ usefulFrom). */
+  pUseful: number;
+  /** Lowest value level that counts as useful: USEFUL_LEVEL, or ACTIONABLE_LEVEL for formula posts. */
+  usefulFrom: number;
+  /** Jev's probability for each value level (index = level). */
+  valueLevels: number[];
+  valueClues: string[];
+
+  /** Jev's intent distribution, most likely first. */
+  intents: { key: IntentKey; label: string; p: number }[];
+  /** P(farm engagement) + P(provoke). */
+  pBaitIntent: number;
+  tactics: FiredTactic[];
+
+  /** Formula writing: explanation only. */
+  formula: { p: number | null; hits: string[] };
+  /** AI-style read: explanation only. */
   ai: { p: number | null; hits: string[] };
+
   partial: boolean;
   cost: number;
   model: string;
 };
 
-export function tierFor(pTemplate: number, signals: number): { tier: Tier; jevTier: Tier; capped: boolean } {
-  const jevTier: Tier =
-    pTemplate >= TIER_THRESHOLDS.slop ? 'slop' : pTemplate >= TIER_THRESHOLDS.some ? 'some' : 'clean';
-  let tier = jevTier;
-  if (tier === 'slop' && signals < MIN_SIGNALS.slop) tier = 'some';
-  if (tier === 'some' && signals < MIN_SIGNALS.some) tier = 'clean';
-  return { tier, jevTier, capped: tier !== jevTier };
-}
+export type JevAnswers = DecisionsResponse<QuestionKey>;
 
-function levelProbabilities(answer: Answer | undefined): number[] {
-  const n = SLOP_LEVELS.length;
-  if (answer?.type !== 'score') return new Array<number>(n).fill(0);
-  const probs = Array.from({ length: n }, (_, i) => answer.probabilities?.[String(i)] ?? 0);
+function distribution(answer: Answer | undefined, keys: string[]): number[] {
+  if (!answer || answer.type === 'noul') return keys.map(() => 0);
+  const probs = keys.map((k) => answer.probabilities?.[k] ?? 0);
   if (probs.some((p) => p > 0)) return probs;
-  // No distribution returned: put all the mass on the nearest level.
-  const out = new Array<number>(n).fill(0);
-  out[Math.min(n - 1, Math.max(0, Math.round(answer.score)))] = 1;
-  return out;
+  // No distribution returned: put all the mass on the answer itself.
+  const idx = answer.type === 'score' ? Math.round(answer.score) : keys.indexOf(answer.choice);
+  return keys.map((_, i) => (i === Math.min(keys.length - 1, Math.max(0, idx)) ? 1 : 0));
 }
 
-function aiProbability(answer: Answer | undefined): number | null {
-  // null for answers cached before the AI question existed.
+function noul(answer: Answer | undefined): number | null {
   return answer?.type === 'noul' ? answer.noul : null;
 }
 
-export function combine(
-  res: DecisionsResponse<SlopQuestionKey>,
-  hits: HeuristicHit[],
-  partial: boolean,
-  aiHits: string[] = [],
-): Verdict {
-  const slop = res.answers.slop;
-  const levels = levelProbabilities(slop);
-  const pTemplate = Math.min(1, levels.slice(TEMPLATE_LEVEL).reduce((a, b) => a + b, 0));
+export function categorize(useful: boolean, bait: boolean): Category {
+  if (useful) return bait ? 'baity' : 'useful';
+  return bait ? 'bait' : 'casual';
+}
 
-  const tells: FiredTell[] = [];
-  for (const key of TELL_KEYS) {
-    const a = res.answers[key];
-    if (a?.type === 'noul' && a.noul >= TELL_THRESHOLD) {
-      const def: { label: string; countsAsSignal?: boolean } = TELLS[key];
-      tells.push({ key, label: def.label, p: a.noul, counted: def.countsAsSignal !== false });
+export function combine(
+  res: JevAnswers,
+  local: LocalChecks,
+  opts: { partial?: boolean; thresholds?: Thresholds } = {},
+): Verdict {
+  const t = opts.thresholds ?? DEFAULT_THRESHOLDS;
+  const a = res.answers;
+
+  // Value axis
+  const valueLevels = distribution(a.value, VALUE_LEVELS.map((_, i) => String(i)));
+  const formulaP = noul(a.formula);
+  const usefulFrom = formulaP !== null && formulaP >= FORMULA_STRICT ? ACTIONABLE_LEVEL : USEFUL_LEVEL;
+  const pUseful = Math.min(1, valueLevels.slice(usefulFrom).reduce((s, p) => s + p, 0));
+  const useful =
+    pUseful >= t.useful || (pUseful >= t.useful - VALUE_CLUE_WINDOW && local.value.length >= 2);
+
+  // Bait axis
+  const intentProbs = distribution(a.intent, INTENT_KEYS);
+  const intents = INTENT_KEYS.map((key, i) => ({ key, label: INTENTS[key].label, p: intentProbs[i] ?? 0 })).sort(
+    (x, y) => y.p - x.p,
+  );
+  const pBaitIntent = Math.min(1, intents.filter((i) => BAIT_INTENTS.includes(i.key)).reduce((s, i) => s + i.p, 0));
+
+  // A tactic fires if Jev says yes or a local phrase matched; the two count once.
+  const tactics: FiredTactic[] = [];
+  for (const key of TACTIC_KEYS) {
+    const p = noul(a[key]);
+    const phrases = local.bait.filter((h) => h.tactic === key).map((h) => h.label);
+    if ((p !== null && p >= NOUL_THRESHOLD) || phrases.length) {
+      tactics.push({ key, label: BAIT_TACTICS[key].label, p, phrases });
     }
   }
-  tells.sort((a, b) => b.p - a.p);
+  tactics.sort((x, y) => (y.p ?? 0) - (x.p ?? 0));
+  const bait = tactics.length >= TACTICS_FOR_BAIT || (tactics.length >= 1 && pBaitIntent >= t.baitIntent);
 
-  // A phrase hit and the Jev pattern it's evidence for count once.
-  const kinds = new Set<string>(tells.filter((t) => t.counted).map((t) => t.key));
-  for (const h of hits) if (h.counted !== false) kinds.add(h.tell ?? h.label);
-  const signals = kinds.size;
-
+  const category = categorize(useful, bait);
   return {
-    score: pTemplate,
-    ...tierFor(pTemplate, signals),
-    signals,
-    levels,
-    jevScore: slop?.type === 'score' ? slop.score : 0,
-    tells,
-    heuristics: hits.map((h) => (h.counted === false ? `${h.label} (context, not counted)` : h.label)),
-    ai: { p: aiProbability(res.answers.ai_style), hits: aiHits },
-    partial,
+    category,
+    predicted: category,
+    userLabel: null,
+    overridden: false,
+    pUseful,
+    usefulFrom,
+    valueLevels,
+    valueClues: local.value,
+    intents,
+    pBaitIntent,
+    tactics,
+    formula: { p: formulaP, hits: local.formula },
+    ai: { p: noul(a.ai_style), hits: local.ai },
+    partial: opts.partial ?? false,
     cost: res.usage?.cost ?? 0,
     model: res.model,
   };
+}
+
+export function applyUserLabel(v: Verdict, label: Category): Verdict {
+  return { ...v, category: label, userLabel: label, overridden: label !== v.predicted };
 }

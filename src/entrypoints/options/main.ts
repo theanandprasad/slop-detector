@@ -1,5 +1,8 @@
+import { MIN_LABELS_TO_CALIBRATE } from '@/lib/calibrate';
 import { clearCache } from '@/lib/cache';
 import { classify } from '@/lib/classify';
+import { allFeedback, clearFeedback, getCalibration } from '@/lib/feedback';
+import { QUESTIONS_VERSION } from '@/lib/questions';
 import { getSettings, getStats, resetStats, saveSettings } from '@/lib/settings';
 
 const SAMPLE_POST = `I got rejected from 47 jobs.
@@ -35,6 +38,7 @@ async function load() {
   siteX.checked = s.sites.x;
   minChars.value = String(s.minChars);
   await renderStats();
+  await renderFeedback();
 }
 
 async function save() {
@@ -78,6 +82,40 @@ async function renderStats() {
   $('stats').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
 }
 
+async function renderFeedback() {
+  const entries = await allFeedback();
+  const current = entries.filter((e) => e.version === QUESTIONS_VERSION);
+  const corrected = entries.filter((e) => e.label !== e.predicted).length;
+  const cal = await getCalibration();
+  const rows: [string, string][] = [
+    ['Labels', `${entries.length} (${corrected} corrected the model)`],
+    [
+      'Tuning',
+      cal
+        ? cal.agreement > cal.defaultAgreement
+          ? `Using your thresholds: useful ≥ ${cal.thresholds.useful}, bait intent ≥ ${cal.thresholds.baitIntent}. Agrees with ${pct(cal.agreement)} of your labels (defaults: ${pct(cal.defaultAgreement)}).`
+          : `Defaults already match you best (${pct(cal.defaultAgreement)} of ${cal.n} labels).`
+        : `Starts after ${MIN_LABELS_TO_CALIBRATE} labels (${current.length} so far).`,
+    ],
+  ];
+  $('feedback').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+
+async function exportFeedback() {
+  const entries = await allFeedback();
+  if (!entries.length) return flash('No labels yet.');
+  // Same shape as eval/labeled.jsonl, so it can be dropped straight into `npm run eval`.
+  const jsonl = entries.map((e) => JSON.stringify({ platform: e.platform, text: e.text, category: e.label })).join('\n') + '\n';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
+  a.download = 'slop-detector-labels.jsonl';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  flash(`Exported ${entries.length} labels.`);
+}
+
+const pct = (p: number) => `${Math.round(p * 100)}%`;
+
 function flash(msg: string) {
   status.textContent = msg;
 }
@@ -89,6 +127,16 @@ $('resetStats').addEventListener('click', async () => {
   await resetStats();
   await renderStats();
 });
-chrome.storage.onChanged.addListener((c) => c.stats && renderStats());
+$('exportFeedback').addEventListener('click', exportFeedback);
+$('clearFeedback').addEventListener('click', async () => {
+  if (!confirm('Delete all your labels? The extension goes back to its default thresholds.')) return;
+  await clearFeedback();
+  await renderFeedback();
+  flash('Labels cleared.');
+});
+chrome.storage.onChanged.addListener((c) => {
+  if (c.stats) void renderStats();
+  if (c.calibration || Object.keys(c).some((k) => k.startsWith('fb:'))) void renderFeedback();
+});
 
 void load();

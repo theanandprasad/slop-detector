@@ -24,7 +24,7 @@
   </head>
   <body>
     <h1>Slop Detector</h1>
-    <p class="note">Labels formulaic, low-effort writing on LinkedIn and X using TypeSafe's Jev model via OpenRouter.</p>
+    <p class="note">Tells you which LinkedIn and X posts are useful and which are just engagement bait, using TypeSafe's Jev model via OpenRouter.</p>
 
     <h2>OpenRouter</h2>
     <label>API key
@@ -46,6 +46,14 @@
       <span id="status"></span>
     </div>
     <pre id="testOut" hidden></pre>
+
+    <h2>Your feedback</h2>
+    <p class="note">Your 👍/👎 labels are stored only in this browser. A label always applies to that post; after 15 labels the extension also re-tunes its thresholds to match you.</p>
+    <dl id="feedback"></dl>
+    <div class="row">
+      <button id="exportFeedback">Export labels (.jsonl)</button>
+      <button id="clearFeedback">Clear labels</button>
+    </div>
 
     <h2>Usage</h2>
     <dl id="stats"></dl>

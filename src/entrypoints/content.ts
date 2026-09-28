@@ -1,6 +1,6 @@
 import { adapterFor } from '@/adapters';
 import type { SiteAdapter } from '@/adapters/types';
-import { sendClassify } from '@/lib/messages';
+import { sendClassify, sendFeedback } from '@/lib/messages';
 import { getSettings } from '@/lib/settings';
 import { createBadge } from '@/ui/badge';
 
@@ -47,7 +47,10 @@ export default defineContentScript({
       if (!state || state.requested) return;
       state.requested = true;
 
-      const badge = createBadge();
+      const partial = adapter!.isTruncated(post);
+      const badge = createBadge({
+        onFeedback: (label) => sendFeedback({ platform: adapter!.platform, text: state.text, partial, label }),
+      });
       state.badge = badge;
       mount(adapter!, post, badge.host);
       badge.refresh(); // now attached, it can pick up the page's colors
@@ -62,7 +65,7 @@ export default defineContentScript({
         const res = await sendClassify({
           platform: adapter!.platform,
           text: textAtRequest,
-          partial: adapter!.isTruncated(post),
+          partial,
         });
         // The element may have been recycled for a different post meanwhile.
         if (states.get(post) !== state) return;

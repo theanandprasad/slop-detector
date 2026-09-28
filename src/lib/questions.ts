@@ -1,121 +1,184 @@
 // The question set sent to Jev for every post. This is the main tuning lever:
 // iterate on wording here and re-run `npm run eval`.
 // Keep criteria short — question definitions dominate input tokens (= cost).
+//
+// Two independent axes decide the badge:
+//   value  — what a reader gets from the post        → useful or not
+//   bait   — whether it's built to extract engagement → bait or not
+// Everything else (formula writing, AI style) is explanation only.
 
-import type { NoulQuestion, ScoreQuestion } from './jev';
+import type { ChoiceQuestion, NoulQuestion, Question, ScoreQuestion } from './jev';
 
-// Bump whenever question wording changes, so cached verdicts from the old
+// Bump whenever question wording changes, so cached answers from the old
 // wording are ignored.
-export const QUESTIONS_VERSION = 5;
+export const QUESTIONS_VERSION = 7;
 
-// "Slop" = a reusable engagement formula. Casual, crude, or angry posts are
-// genuine voice, not slop, so the levels spell out what a formula looks like.
-// Level 1 deliberately absorbs "generic but not a formula" posts (aphorisms,
-// familiar sentiments, polished announcements) so they don't get pushed to 2.
-export const SLOP_LEVELS = [
-  "Own voice: specific, personal, casual, opinionated, or ranting; not a reusable formula",
-  'Own voice but generic: a familiar sentiment, aphorism, or announcement, or a few stock phrases; no clear formula',
-  'Clearly follows a reusable engagement formula (hook → lesson/list → call to action); swap the topic and the post still works',
-  'Pure formula: empty, interchangeable engagement farming with nothing specific',
+export type Platform = 'linkedin' | 'x';
+
+export type PostState = {
+  platform: Platform;
+  kind: 'post';
+  text: string;
+};
+
+// ── Axis 1: value ────────────────────────────────────────────────────────────
+
+// Judge the takeaway, not the telling: story details ("a shared room with 6
+// people") look concrete but aren't information a reader can use, and a moral
+// drawn from a story is a platitude, not an idea.
+export const VALUE_LEVELS = [
+  'Nothing to take away',
+  'A platitude or feel-good moral, even when told through a story or anecdote',
+  'A non-obvious idea or argument the reader could apply or debate',
+  'Concrete information the reader can act on: steps, data, tools, news, or a resource',
 ];
 
-/** Short names for SLOP_LEVELS, for display. */
-export const SLOP_LEVEL_NAMES = ['Genuine', 'Mostly genuine', 'Template', 'Pure slop'];
+/** Short names for VALUE_LEVELS, for display. */
+export const VALUE_LEVEL_NAMES = ['Nothing', 'Platitude / moral', 'Idea', 'Actionable info'];
 
-/** Levels at or above this count as "templated" when computing P(slop). */
-export const TEMPLATE_LEVEL = 2;
+/** Levels at or above this count as "useful" when computing P(useful). */
+export const USEFUL_LEVEL = 2;
+/** The level formula-written posts must reach to count as useful (see score.ts). */
+export const ACTIONABLE_LEVEL = 3;
 
-export const TELLS = {
-  no_specifics: {
-    label: 'No concrete specifics',
-    // Shown as context but not counted as a signal: it fires on nearly every
-    // aphorism, opinion, or joke, so it can't tell slop from non-slop.
-    countsAsSignal: false,
-    question: {
-      type: 'noul',
-      instructions: 'Does the post make broad claims or lessons without concrete names, numbers, places, or verifiable details?',
-      criteria: {
-        true: 'Generic and abstract; could have been written by anyone about anything.',
-        false: 'Grounded in specific, concrete details only this author would know.',
-      },
-    },
-  },
-  engagement_bait: {
-    label: 'Engagement bait',
-    question: {
-      type: 'noul',
-      instructions: 'Does the post fish for engagement (e.g. "Agree?", "Thoughts?", "Repost if…", "Comment X and I\'ll send…", "Follow for more")?',
-      criteria: {
-        true: 'Contains an explicit call for likes, comments, reposts, or follows.',
-        false: 'No engagement solicitation beyond a natural question.',
-      },
-    },
-  },
-  contrast_framing: {
-    label: '"It\'s not X, it\'s Y" framing',
-    question: {
-      type: 'noul',
-      instructions: 'Does the post lean on formulaic reversals like "It\'s not X. It\'s Y." or "X isn\'t about A, it\'s about B"?',
-      criteria: {
-        true: 'Uses this reversal pattern as a rhetorical crutch.',
-        false: 'Does not rely on this pattern.',
-      },
-    },
-  },
-  manufactured_story: {
-    label: 'Templated story arc',
-    question: {
-      type: 'noul',
-      instructions: 'Is this a templated story arc (setback or humble moment → epiphany → neat life/business lesson)?',
-      criteria: {
-        true: 'Follows the setback-to-lesson template, often feeling staged.',
-        false: 'No such arc, or the story is messy and genuinely particular.',
-      },
-    },
-  },
-  broetry: {
-    label: 'Broetry formatting',
-    question: {
-      type: 'noul',
-      instructions: 'Is the post formatted as dramatic one-line paragraphs or stacked emoji bullets for effect?',
-      criteria: {
-        true: 'Short dramatic lines or emoji-bullet lists used for effect.',
-        false: 'Normal paragraphs or ordinary formatting.',
-      },
-    },
-  },
-  buzzword_voice: {
-    label: 'Stock AI/corporate vocabulary',
-    question: {
-      type: 'noul',
-      instructions: 'Is the post heavy on stock vocabulary (delve, landscape, game-changer, unlock, leverage, navigate, journey, in today\'s fast-paced world)?',
-      criteria: {
-        true: 'Relies on this stock vocabulary.',
-        false: 'Plain or distinctive word choice.',
-      },
-    },
-  },
-  hook_formula: {
-    label: 'Formula hook',
-    question: {
-      type: 'noul',
-      instructions: 'Does it open with a formula hook ("Here\'s the thing", "Let that sink in", "Nobody talks about this", "I was fired. Best thing that ever happened.")?',
-      criteria: {
-        true: 'Opens with a recognizable scroll-stopping formula.',
-        false: 'Opens naturally.',
-      },
-    },
-  },
-} as const satisfies Record<string, { label: string; question: NoulQuestion; countsAsSignal?: boolean }>;
+const VALUE_QUESTION: ScoreQuestion = {
+  type: 'score',
+  instructions:
+    'What can a reader actually use or learn from this post, judged only by the text? Would they know or be able to do something new? Story details and a moral do not count as usable information, and a promise of value elsewhere does not count.',
+  criteria: VALUE_LEVELS,
+};
 
-export type TellKey = keyof typeof TELLS;
+// ── Axis 2: bait ─────────────────────────────────────────────────────────────
 
-export const TELL_KEYS = Object.keys(TELLS) as TellKey[];
+export const INTENTS = {
+  inform: { label: 'Inform', criterion: 'Share information, a how-to, news, or a resource' },
+  opinion: { label: 'Opinion', criterion: 'Share an opinion, take, or reaction' },
+  personal: { label: 'Personal update', criterion: 'Share personal news, a milestone, or a story from their life' },
+  discussion: { label: 'Discussion', criterion: 'Ask a genuine question or start a real discussion' },
+  entertain: { label: 'Entertain', criterion: 'A joke, meme, or entertainment' },
+  promote: { label: 'Promote', criterion: 'Promote a product, job, event, or service' },
+  farm_engagement: { label: 'Farm engagement', criterion: 'Mainly to collect likes, comments, reposts, or follows' },
+  provoke: { label: 'Provoke', criterion: 'Deliberately divisive, to trigger angry replies' },
+} as const;
 
-// Separate from the slop verdict on purpose: AI-authorship judgments are unreliable
-// (edited AI text passes as human; non-native writers get misflagged), so this is
-// shown as its own line and never affects the tier or counts as a signal.
-export const AI_STYLE_QUESTION: NoulQuestion = {
+export type IntentKey = keyof typeof INTENTS;
+export const INTENT_KEYS = Object.keys(INTENTS) as IntentKey[];
+/** Intents whose probability adds up to P(bait intent). */
+export const BAIT_INTENTS: IntentKey[] = ['farm_engagement', 'provoke'];
+
+const INTENT_QUESTION: ChoiceQuestion = {
+  type: 'choice',
+  instructions: 'What is this post mainly trying to do?',
+  criteria: Object.fromEntries(INTENT_KEYS.map((k) => [k, INTENTS[k].criterion])),
+};
+
+// Named bait tactics. A bait verdict always needs at least one of these, so the
+// badge can always say *how* a post is baiting.
+export const BAIT_TACTICS = {
+  gated_value: {
+    label: 'Gated value',
+    question: {
+      type: 'noul',
+      instructions:
+        'Does the post hold back its value until the reader engages (e.g. "Comment X and I\'ll send it", "DM me for the guide", "Follow to get it")?',
+      criteria: {
+        true: 'The value is gated behind a comment, DM, follow, or repost.',
+        false: 'Whatever it offers is in the post or freely linked.',
+      },
+    },
+  },
+  unpaid_hook: {
+    label: 'Hook without payoff',
+    question: {
+      type: 'noul',
+      instructions:
+        'Does the opening promise something (a secret, a lesson, a list, a story) that the post itself never actually delivers?',
+      criteria: {
+        true: "The hook's promise goes unpaid in the text.",
+        false: 'The post delivers what it opens with, or makes no such promise.',
+      },
+    },
+  },
+  engagement_ask: {
+    label: 'Asks for engagement',
+    question: {
+      type: 'noul',
+      instructions:
+        'Does it explicitly ask for engagement ("Agree?", "Thoughts?", "Repost if…", "Tag someone who…", "Save this", "Follow for more")?',
+      criteria: {
+        true: 'An explicit call for likes, comments, reposts, tags, saves, or follows.',
+        false: 'No such ask beyond a natural question.',
+      },
+    },
+  },
+  rage_bait: {
+    label: 'Rage bait',
+    question: {
+      type: 'noul',
+      instructions: 'Is it deliberately inflammatory or divisive in order to provoke replies, rather than sincerely expressing a view?',
+      criteria: {
+        true: 'Written to provoke outrage or pile-ons.',
+        false: 'Sincere, even if angry or strongly opinionated.',
+      },
+    },
+  },
+  unverifiable_flex: {
+    label: 'Unverifiable flex',
+    question: {
+      type: 'noul',
+      instructions:
+        'Does it lean on impressive but unverifiable claims (income, growth, followers, number of rejections) to grab attention?',
+      criteria: {
+        true: 'Attention-grabbing claims with nothing to back them up.',
+        false: 'No such claims, or they are specific and checkable.',
+      },
+    },
+  },
+  staged_story: {
+    label: 'Staged story',
+    question: {
+      type: 'noul',
+      instructions:
+        'Is it a too-neat viral anecdote (quoted dialogue, a dramatic turn like "That hit hard", a tidy moral in one-liners) told to go viral rather than to inform?',
+      criteria: {
+        true: 'A staged, feel-good or outrage story engineered around a moral.',
+        false: 'No such story, or a messy, specific account told for its own sake.',
+      },
+    },
+  },
+  link_in_comments: {
+    label: 'Link in comments',
+    question: {
+      type: 'noul',
+      instructions: 'Does it send readers to the comments for the link or for the rest of the content?',
+      criteria: {
+        true: 'Points readers to the comments to get the link or content.',
+        false: 'No such redirection.',
+      },
+    },
+  },
+} as const satisfies Record<string, { label: string; question: NoulQuestion }>;
+
+export type TacticKey = keyof typeof BAIT_TACTICS;
+export const TACTIC_KEYS = Object.keys(BAIT_TACTICS) as TacticKey[];
+
+// ── Explanation only ─────────────────────────────────────────────────────────
+
+// Formula writing (broetry, hook → lesson → CTA) can still be useful, so it's
+// shown as context and never decides the badge.
+const FORMULA_QUESTION: NoulQuestion = {
+  type: 'noul',
+  instructions:
+    'Is it written as a reusable engagement formula (hook → lesson or list → call to action, dramatic one-line paragraphs, stock phrases)?',
+  criteria: {
+    true: 'Follows a recognizable engagement formula.',
+    false: "Written in the author's own way.",
+  },
+};
+
+// AI-authorship judgments are unreliable (edited AI text passes as human;
+// non-native writers get misflagged), so this is shown on its own line only.
+const AI_STYLE_QUESTION: NoulQuestion = {
   type: 'noul',
   instructions: 'Does this text read as generated by an AI assistant (ChatGPT-style prose) rather than written by a person?',
   criteria: {
@@ -124,23 +187,15 @@ export const AI_STYLE_QUESTION: NoulQuestion = {
   },
 };
 
-export type SlopQuestionKey = 'slop' | 'ai_style' | TellKey;
+export type QuestionKey = 'value' | 'intent' | 'formula' | 'ai_style' | TacticKey;
 
-export function buildQuestions(): Record<SlopQuestionKey, NoulQuestion | ScoreQuestion> {
+export function buildQuestions(): Record<QuestionKey, Question> {
   const questions = {
-    slop: {
-      type: 'score',
-      instructions: 'Is this post built from a reusable engagement formula, or written in the author\'s own voice? Strong opinions, rants, jokes and reactions are own voice, not formulas. A generic or familiar idea is not a formula by itself.',
-      criteria: SLOP_LEVELS,
-    },
+    value: VALUE_QUESTION,
+    intent: INTENT_QUESTION,
+    formula: FORMULA_QUESTION,
     ai_style: AI_STYLE_QUESTION,
-  } as Record<SlopQuestionKey, NoulQuestion | ScoreQuestion>;
-  for (const key of TELL_KEYS) questions[key] = TELLS[key].question;
+  } as Record<QuestionKey, Question>;
+  for (const key of TACTIC_KEYS) questions[key] = BAIT_TACTICS[key].question;
   return questions;
 }
-
-export type PostState = {
-  platform: 'linkedin' | 'x';
-  kind: 'post';
-  text: string;
-};

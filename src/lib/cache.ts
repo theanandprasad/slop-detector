@@ -4,23 +4,25 @@
 // so scoring/threshold changes apply to cached posts without new API calls.
 
 import { QUESTIONS_VERSION } from './questions';
-import type { SlopResponse } from './classify';
+import type { JevAnswers } from './score';
 
 const PREFIX = 'v:';
 const MAX_ENTRIES = 5000;
 const PRUNE_TO = 4000;
 const TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-type Entry = { res: SlopResponse; t: number };
+type Entry = { res: JevAnswers; t: number };
 
-export async function cacheKey(model: string, text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(`${model}\nq${QUESTIONS_VERSION}\n${text}`);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
-  return PREFIX + hex.slice(0, 32);
+export async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
 }
 
-export async function getCached(key: string): Promise<SlopResponse | undefined> {
+export async function cacheKey(model: string, text: string): Promise<string> {
+  return PREFIX + (await sha256Hex(`${model}\nq${QUESTIONS_VERSION}\n${text}`));
+}
+
+export async function getCached(key: string): Promise<JevAnswers | undefined> {
   const got = await chrome.storage.local.get(key);
   const entry = got[key] as Partial<Entry> | undefined;
   // Entries from older versions stored finished verdicts (no `res`): treat as a miss.
@@ -30,7 +32,7 @@ export async function getCached(key: string): Promise<SlopResponse | undefined> 
 
 let writesSincePrune = 0;
 
-export async function putCached(key: string, res: SlopResponse): Promise<void> {
+export async function putCached(key: string, res: JevAnswers): Promise<void> {
   await chrome.storage.local.set({ [key]: { res, t: Date.now() } satisfies Entry });
   if (++writesSincePrune >= 200) {
     writesSincePrune = 0;
